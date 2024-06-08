@@ -286,7 +286,7 @@ class ControllerNode(Node):
                     self.rate.sleep()
             self.last_distance_to_goal = 1000
             self.controller.compute_distance_to_goal(self.state, 0)
-            self.controller.next_path_idx = 0
+            self.controller.last_path_pose_id = 0
 
             for j in range(0, self.controller.path.n_poses):
                 self.get_logger().info('ref_traj_x_' + str(j) + ' ' + str(self.controller.path.poses[j, 0]))
