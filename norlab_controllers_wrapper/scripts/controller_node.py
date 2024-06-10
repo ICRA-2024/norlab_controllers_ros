@@ -78,7 +78,7 @@ class ControllerNode(Node):
         self._action_server = ActionServer(
             self,
             FollowPath,
-            'follow_path',
+            '/follow_path',
             self.follow_path_callback
         )
 
