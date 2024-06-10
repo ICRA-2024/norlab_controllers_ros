@@ -157,6 +157,21 @@ class ControllerNode(Node):
         yaw = np.arctan2(siny_cosp, cosy_cosp)
 
         return np.array([roll, pitch, yaw])
+    
+    def euler_to_quaternion(self, roll, pitch, yaw):
+        cy = np.cos(yaw * 0.5)
+        sy = np.sin(yaw * 0.5)
+        cp = np.cos(pitch * 0.5)
+        sp = np.sin(pitch * 0.5)
+        cr = np.cos(roll * 0.5)
+        sr = np.sin(roll * 0.5)
+
+        x = cy * cp * sr - sy * sp * cr
+        y = sy * cp * sr + cy * sp * cr
+        z = sy * cp * cr - cy * sp * sr
+        w = cy * cp * cr + sy * sp * sr
+
+        return x, y, z, w
 
     def odometry_callback(self, message):
         with self.state_velocity_mutex:
@@ -203,7 +218,7 @@ class ControllerNode(Node):
             pose.header.frame_id = "map"
             pose.pose.position.x = self.controller.optim_trajectory_array[0, k]
             pose.pose.position.y = self.controller.optim_trajectory_array[1, k]
-            pose.pose.position.z = 0.0
+            pose.pose.position.z = 0.02
             pose.pose.orientation.x = 0.0
             pose.pose.orientation.y = 0.0
             pose.pose.orientation.z = 0.0
@@ -220,11 +235,12 @@ class ControllerNode(Node):
             pose.header.frame_id = "map"
             pose.pose.position.x = self.controller.target_trajectory[0, k]
             pose.pose.position.y = self.controller.target_trajectory[1, k]
-            pose.pose.position.z = 0.0
-            pose.pose.orientation.x = 0.0
-            pose.pose.orientation.y = 0.0
-            pose.pose.orientation.z = 0.0
-            pose.pose.orientation.w = 1.0
+            pose.pose.position.z = 0.01
+            x, y, z, w = self.euler_to_quaternion(0.0, 0.0, self.controller.target_trajectory[2, k])
+            pose.pose.orientation.x = x
+            pose.pose.orientation.y = y
+            pose.pose.orientation.z = z
+            pose.pose.orientation.w = w
             self.target_path_msg.poses.append(pose)
         self.target_path_publisher_.publish(self.target_path_msg)
 
@@ -297,7 +313,7 @@ class ControllerNode(Node):
                 self.publish_optimal_path()
                 self.publish_target_path()
                 self.print_debug()
-                if self.controller.orthogonal_projection_id >= self.controller.path.n_poses-1:
+                if self.controller.next_path_idx >= self.controller.path.n_poses-1:
                     if self.controller.distance_to_goal > self.last_distance_to_goal:
                         break
                     else:
