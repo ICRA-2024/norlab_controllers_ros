@@ -41,14 +41,15 @@ def launch_controller_node(context, *args, **kwargs):
         package='norlab_controllers_wrapper',
         executable='controller_node.py',
         name="controller_node",
+        namespace="controller",
         output='screen',
         parameters=[
             {"controller_config": controller_config_path},
             {"rotation_controller_config": rotation_config_path}
         ],
         remappings=[
-            ("odom_in", "icp_odom"),
-            ("cmd_vel_out", "cmd_vel" if "warthog" in arg_robot else "nav_vel")
+            ("odom_in", "/icp_odom"),
+            ("cmd_vel_out", "/cmd_vel" if "warthog" in arg_robot else "nav_vel")
         ]
     )
 
