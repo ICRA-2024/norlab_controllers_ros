@@ -10,7 +10,7 @@ from rclpy.action import ActionServer
 from rclpy.executors import MultiThreadedExecutor
 from multiprocessing import Lock
 
-from geometry_msgs.msg import Twist, PoseStamped
+from geometry_msgs.msg import TwistStamped, PoseStamped
 from nav_msgs.msg import Odometry
 from nav_msgs.msg import Path as Ros2Path
 
@@ -57,8 +57,8 @@ class ControllerNode(Node):
         self.velocity = np.zeros(6) # [vx, vy, vz, v_roll, v_pitch, v_yaw]
         self.state_velocity_mutex = Lock()
 
-        self.cmd_publisher_ = self.create_publisher(Twist, 'cmd_vel_out', 100)
-        self.cmd_vel_msg = Twist()
+        self.cmd_publisher_ = self.create_publisher(TwistStamped, 'cmd_vel_out', 100)
+        self.cmd_vel_msg = TwistStamped()
         self.optim_path_publisher_ = self.create_publisher(Ros2Path, 'optimal_path', 100)
         self.optim_path_msg = Ros2Path()
         self.optim_path_msg.header.frame_id = "map"
@@ -78,7 +78,7 @@ class ControllerNode(Node):
         self._action_server = ActionServer(
             self,
             FollowPath,
-            'follow_path',
+            '/follow_path',
             self.follow_path_callback
         )
 
@@ -175,23 +175,25 @@ class ControllerNode(Node):
             self.velocity[5] = message.twist.twist.angular.z
 
     def command_array_to_twist_msg(self, command_array):
-        self.cmd_vel_msg.linear.x = command_array[0]
-        self.cmd_vel_msg.linear.y = 0.0
-        self.cmd_vel_msg.linear.z = 0.0
-        self.cmd_vel_msg.angular.x = 0.0
-        self.cmd_vel_msg.angular.y = 0.0
-        self.cmd_vel_msg.angular.z = command_array[1]
+        self.cmd_vel_msg.twist.linear.x = command_array[0]
+        self.cmd_vel_msg.twist.linear.y = 0.0
+        self.cmd_vel_msg.twist.linear.z = 0.0
+        self.cmd_vel_msg.twist.angular.x = 0.0
+        self.cmd_vel_msg.twist.angular.y = 0.0
+        self.cmd_vel_msg.twist.angular.z = command_array[1]
 
     def compute_then_publish_command(self):
         with self.state_velocity_mutex:
             command_vector = self.controller.compute_command_vector(self.state)
             self.command_array_to_twist_msg(command_vector)
+            self.cmd_vel_msg.header.stamp = self.get_clock().now().to_msg()
             self.cmd_publisher_.publish(self.cmd_vel_msg)
 
     def compute_then_publish_rotation_command(self):
         with self.state_velocity_mutex:
             command_vector = self.rotation_controller.compute_command_vector(self.state)
             self.command_array_to_twist_msg(command_vector)
+            self.cmd_vel_msg.header.stamp = self.get_clock().now().to_msg()
             self.cmd_publisher_.publish(self.cmd_vel_msg)
 
     def publish_optimal_path(self):
@@ -304,7 +306,8 @@ class ControllerNode(Node):
                         self.last_distance_to_goal = self.controller.distance_to_goal
                 self.rate.sleep()
 
-        self.cmd_vel_msg = Twist()
+        self.cmd_vel_msg = TwistStamped()
+        self.cmd_vel_msg.header.stamp = self.get_clock().now().to_msg()
         self.cmd_publisher_.publish(self.cmd_vel_msg)
 
         self.get_logger().info("SUCCESS")
