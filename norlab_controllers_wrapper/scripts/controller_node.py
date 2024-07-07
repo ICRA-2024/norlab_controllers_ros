@@ -8,6 +8,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionServer
 from rclpy.executors import MultiThreadedExecutor
+from rclpy.qos import qos_profile_action_status_default
 from multiprocessing import Lock
 
 from geometry_msgs.msg import TwistStamped, PoseStamped
@@ -38,7 +39,6 @@ class ControllerNode(Node):
         rotation_controller_config_path = self.get_parameter('rotation_controller_config').get_parameter_value().string_value
         self.get_logger().info(f"Rotation controller config: {rotation_controller_config_path}")
 
-        
         self.controller_factory = ControllerFactory()
         self.controller = self.controller_factory.load_parameters_from_yaml(controller_config_path)
 
@@ -51,30 +51,41 @@ class ControllerNode(Node):
         # Add the dynamic parameter
         self.init_params(controller_config_path)
         
-
-        #
+        # Initialize state and velocity
         self.state = np.zeros(6) # [x, y, z, roll, pitch, yaw]
         self.velocity = np.zeros(6) # [vx, vy, vz, v_roll, v_pitch, v_yaw]
         self.state_velocity_mutex = Lock()
 
-        self.cmd_publisher_ = self.create_publisher(TwistStamped, 'cmd_vel_out', 100)
-        self.cmd_vel_msg = TwistStamped()
-        self.optim_path_publisher_ = self.create_publisher(Ros2Path, 'optimal_path', 100)
-        self.optim_path_msg = Ros2Path()
-        self.optim_path_msg.header.frame_id = "map"
-        self.target_path_publisher_ = self.create_publisher(Ros2Path, 'target_path', 100)
-        self.target_path_msg = Ros2Path()
-        self.target_path_msg.header.frame_id = "map"
-        self.ref_path_publisher_ = self.create_publisher(Ros2Path, 'ref_path', 100)
-        self.ref_path_msg = Ros2Path()
-        self.ref_path_msg.header.frame_id = "map"
+        # Initialize publishers
+        self.cmd_publisher_ = self.create_publisher(
+            TwistStamped, 
+            'cmd_vel_out', 
+            100
+        )
+        self.optim_path_publisher_ = self.create_publisher(
+            Ros2Path, 
+            'optimal_path', 
+            100
+        )
+        self.target_path_publisher_ = self.create_publisher(
+            Ros2Path, 
+            'target_path', 
+            100
+        )
+        self.ref_path_publisher_ = self.create_publisher(
+            Ros2Path, 
+            'ref_path', 
+            qos_profile_action_status_default      # Makes durability transient_local
+        )
 
+        # Initialize subscribers
         self.odom_subscription = self.create_subscription(
             Odometry,
             'odom_in',
             self.odometry_callback,
             10)
 
+        # Initialize action server
         self._action_server = ActionServer(
             self,
             FollowPath,
@@ -87,8 +98,6 @@ class ControllerNode(Node):
         self.waiting_for_path = True
         self.loading_path = False
         self.executing_path = False
-
-
         
         
     def init_params(self,yaml_file_path):
@@ -190,78 +199,65 @@ class ControllerNode(Node):
             self.velocity[5] = message.twist.twist.angular.z
 
     def command_array_to_twist_msg(self, command_array):
-        self.cmd_vel_msg.twist.linear.x = command_array[0]
-        self.cmd_vel_msg.twist.linear.y = 0.0
-        self.cmd_vel_msg.twist.linear.z = 0.0
-        self.cmd_vel_msg.twist.angular.x = 0.0
-        self.cmd_vel_msg.twist.angular.y = 0.0
-        self.cmd_vel_msg.twist.angular.z = command_array[1]
+        cmd_vel_msg = TwistStamped()
+        cmd_vel_msg.header.stamp = self.get_clock().now().to_msg()
+        cmd_vel_msg.twist.linear.x = command_array[0]
+        cmd_vel_msg.twist.angular.z = command_array[1]
+        return cmd_vel_msg
+    
+    def planar_state_to_pose_msg(self, planar_state):
+        pose_msg = PoseStamped()
+        pose_msg.header.frame_id = "map"
+        pose_msg.header.stamp = self.get_clock().now().to_msg()
+        pose_msg.pose.position.x = planar_state[0]
+        pose_msg.pose.position.y = planar_state[1]
+        pose_msg.pose.position.z = 0.0
+        x, y, z, w = self.euler_to_quaternion(0.0, 0.0, planar_state[2])
+        pose_msg.pose.orientation.x = x
+        pose_msg.pose.orientation.y = y
+        pose_msg.pose.orientation.z = z
+        pose_msg.pose.orientation.w = w
+        return pose_msg
 
     def compute_then_publish_command(self):
         with self.state_velocity_mutex:
             command_vector = self.controller.compute_command_vector(self.state)
-            self.command_array_to_twist_msg(command_vector)
-            self.cmd_vel_msg.header.stamp = self.get_clock().now().to_msg()
-            self.cmd_publisher_.publish(self.cmd_vel_msg)
+            cmd_vel_msg = self.command_array_to_twist_msg(command_vector)
+            self.cmd_publisher_.publish(cmd_vel_msg)
 
     def compute_then_publish_rotation_command(self):
         with self.state_velocity_mutex:
             command_vector = self.rotation_controller.compute_command_vector(self.state)
-            self.command_array_to_twist_msg(command_vector)
-            self.cmd_vel_msg.header.stamp = self.get_clock().now().to_msg()
-            self.cmd_publisher_.publish(self.cmd_vel_msg)
+            cmd_vel_msg = self.command_array_to_twist_msg(command_vector)
+            self.cmd_publisher_.publish(cmd_vel_msg)
 
     def publish_optimal_path(self):
-        self.optim_path_msg.header.stamp = self.get_clock().now().to_msg()
-        self.optim_path_msg = Ros2Path()
-        self.optim_path_msg.header.frame_id = "map"
+        optim_path_msg = Ros2Path()
+        optim_path_msg.header.stamp = self.get_clock().now().to_msg()
+        optim_path_msg.header.frame_id = "map"
         for k in range(0, self.controller.horizon_length):
-            pose = PoseStamped()
-            pose.header.frame_id = "map"
-            pose.pose.position.x = self.controller.optim_trajectory_array[0, k]
-            pose.pose.position.y = self.controller.optim_trajectory_array[1, k]
-            pose.pose.position.z = 0.02
-            pose.pose.orientation.x = 0.0
-            pose.pose.orientation.y = 0.0
-            pose.pose.orientation.z = 0.0
-            pose.pose.orientation.w = 1.0
-            self.optim_path_msg.poses.append(pose)
-        self.optim_path_publisher_.publish(self.optim_path_msg)
+            pose = self.planar_state_to_pose_msg(self.controller.optim_trajectory_array[:, k])
+            optim_path_msg.poses.append(pose)
+        self.optim_path_publisher_.publish(optim_path_msg)
 
     def publish_target_path(self):
-        self.target_path_msg.header.stamp = self.get_clock().now().to_msg()
-        self.target_path_msg = Ros2Path()
-        self.target_path_msg.header.frame_id = "map"
+        target_path_msg = Ros2Path()
+        target_path_msg.header.stamp = self.get_clock().now().to_msg()
+        target_path_msg.header.frame_id = "map"
         for k in range(0, self.controller.horizon_length):
-            pose = PoseStamped()
-            pose.header.frame_id = "map"
-            pose.pose.position.x = self.controller.target_trajectory[0, k]
-            pose.pose.position.y = self.controller.target_trajectory[1, k]
-            pose.pose.position.z = 0.01
-            x, y, z, w = self.euler_to_quaternion(0.0, 0.0, self.controller.target_trajectory[2, k])
-            pose.pose.orientation.x = x
-            pose.pose.orientation.y = y
-            pose.pose.orientation.z = z
-            pose.pose.orientation.w = w
-            self.target_path_msg.poses.append(pose)
-        self.target_path_publisher_.publish(self.target_path_msg)
+            pose = self.planar_state_to_pose_msg(self.controller.target_trajectory[:, k])
+            target_path_msg.poses.append(pose)
+        self.target_path_publisher_.publish(target_path_msg)
 
     def publish_reference_path(self):
-        self.ref_path_msg.header.stamp = self.get_clock().now().to_msg()
-        self.ref_path_msg = Ros2Path()
-        self.ref_path_msg.header.frame_id = "map"
+        ref_path_msg = Ros2Path()
+        ref_path_msg.header.stamp = self.get_clock().now().to_msg()
+        ref_path_msg.header.frame_id = "map"
         for k in range(0, self.controller.path.n_poses):
-            pose = PoseStamped()
-            pose.header.frame_id = "map"
-            pose.pose.position.x = self.controller.path.poses[k, 0]
-            pose.pose.position.y = self.controller.path.poses[k, 1]
-            pose.pose.position.z = 0.0
-            pose.pose.orientation.x = 0.0
-            pose.pose.orientation.y = 0.0
-            pose.pose.orientation.z = 0.0
-            pose.pose.orientation.w = 1.0
-            self.ref_path_msg.poses.append(pose)
-        self.ref_path_publisher_.publish(self.ref_path_msg)
+            planar_state = [self.controller.path.poses[k, 0], self.controller.path.poses[k, 1], self.controller.path.angles[k]]
+            pose = self.planar_state_to_pose_msg(planar_state)
+            ref_path_msg.poses.append(pose)
+        self.ref_path_publisher_.publish(ref_path_msg)
 
     def follow_path_callback(self, path_goal_handle):
         ## Importing all goal paths
@@ -293,12 +289,12 @@ class ControllerNode(Node):
             # load all goal paths in sequence
             self.get_logger().info("Executing path " + str(i + 1) + " of " + str(self.number_of_goal_paths))
             self.controller.update_path(self.goal_paths_list[i])
-            self.rotation_controller.update_path(self.goal_paths_list[i])
             self.publish_reference_path()
             self.controller.previous_input_array = np.zeros((2, self.controller.horizon_length))
 
             # while loop to repeat a single goal path
             if i > 0 and self.rotation_controller_bool:
+                self.rotation_controller.update_path(self.goal_paths_list[i])
                 while self.rotation_controller.angular_distance_to_goal >= self.rotation_controller.goal_tolerance:
                     self.compute_then_publish_rotation_command()
                     self.rate.sleep()
