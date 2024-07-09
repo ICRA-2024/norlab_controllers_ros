@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
 import os
-import std_msgs.msg
 import numpy as np
 
 import rclpy
@@ -11,9 +10,10 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.qos import qos_profile_action_status_default
 from multiprocessing import Lock
 
-from geometry_msgs.msg import TwistStamped, PoseStamped
+from geometry_msgs.msg import TwistStamped, PoseStamped, Point, Quaternion
 from nav_msgs.msg import Odometry
 from nav_msgs.msg import Path as Ros2Path
+from std_msgs.msg import UInt32
 
 from norlabcontrollib.path.path import Path
 from norlabcontrollib.controllers.controller_factory import ControllerFactory
@@ -21,10 +21,13 @@ from norlab_controllers_msgs.action import FollowPath
 from rcl_interfaces.msg import SetParametersResult
 import yaml
 
+from scipy.spatial.transform import Rotation as R
+
+
 class ControllerNode(Node):
 
     def __init__(self):
-        super().__init__('controller_node')
+        super().__init__("controller_node")
 
         # TODO: Check if these lines are necessary
         abspath = os.path.abspath(__file__)
@@ -32,65 +35,66 @@ class ControllerNode(Node):
         os.chdir(dname)
         self.get_logger().info(os.getcwd())
 
-        self.declare_parameter('controller_config')
-        controller_config_path = self.get_parameter('controller_config').get_parameter_value().string_value
+        self.declare_parameter("controller_config")
+        controller_config_path = (
+            self.get_parameter("controller_config").get_parameter_value().string_value
+        )
         self.get_logger().info(f"Controller config: {controller_config_path}")
-        self.declare_parameter('rotation_controller_config')
-        rotation_controller_config_path = self.get_parameter('rotation_controller_config').get_parameter_value().string_value
-        self.get_logger().info(f"Rotation controller config: {rotation_controller_config_path}")
+        self.declare_parameter("rotation_controller_config")
+        rotation_controller_config_path = (
+            self.get_parameter("rotation_controller_config")
+            .get_parameter_value()
+            .string_value
+        )
+        self.get_logger().info(
+            f"Rotation controller config: {rotation_controller_config_path}"
+        )
 
         self.controller_factory = ControllerFactory()
-        self.controller = self.controller_factory.load_parameters_from_yaml(controller_config_path)
+        self.controller = self.controller_factory.load_parameters_from_yaml(
+            controller_config_path
+        )
 
-        if rotation_controller_config_path == 'None':
+        if rotation_controller_config_path == "None":
             self.rotation_controller_bool = False
         else:
-            self.rotation_controller = self.controller_factory.load_parameters_from_yaml(rotation_controller_config_path)
+            self.rotation_controller = (
+                self.controller_factory.load_parameters_from_yaml(
+                    rotation_controller_config_path
+                )
+            )
             self.rotation_controller_bool = True
 
         # Add the dynamic parameter
         self.init_params(controller_config_path)
-        
+
         # Initialize state and velocity
-        self.state = np.zeros(6) # [x, y, z, roll, pitch, yaw]
-        self.velocity = np.zeros(6) # [vx, vy, vz, v_roll, v_pitch, v_yaw]
+        self.state = np.zeros(6)  # [x, y, z, roll, pitch, yaw]
+        self.velocity = np.zeros(6)  # [vx, vy, vz, v_roll, v_pitch, v_yaw]
         self.state_velocity_mutex = Lock()
 
         # Initialize publishers
-        self.cmd_publisher_ = self.create_publisher(
-            TwistStamped, 
-            'cmd_vel_out', 
-            100
-        )
+        self.cmd_publisher_ = self.create_publisher(TwistStamped, "cmd_vel_out", 100)
         self.optim_path_publisher_ = self.create_publisher(
-            Ros2Path, 
-            'optimal_path', 
-            100
+            Ros2Path, "optimal_path", 100
         )
         self.target_path_publisher_ = self.create_publisher(
-            Ros2Path, 
-            'target_path', 
-            100
+            Ros2Path, "target_path", 100
         )
         self.ref_path_publisher_ = self.create_publisher(
-            Ros2Path, 
-            'ref_path', 
-            qos_profile_action_status_default      # Makes durability transient_local
+            Ros2Path,
+            "ref_path",
+            qos_profile_action_status_default,  # Makes durability transient_local
         )
 
         # Initialize subscribers
         self.odom_subscription = self.create_subscription(
-            Odometry,
-            'odom_in',
-            self.odometry_callback,
-            10)
+            Odometry, "odom_in", self.odometry_callback, 10
+        )
 
         # Initialize action server
         self._action_server = ActionServer(
-            self,
-            FollowPath,
-            '/follow_path',
-            self.follow_path_callback
+            self, FollowPath, "/follow_path", self.follow_path_callback
         )
 
         self.rate = self.create_rate(self.controller.rate)
@@ -98,105 +102,68 @@ class ControllerNode(Node):
         self.waiting_for_path = True
         self.loading_path = False
         self.executing_path = False
-        
-        
-    def init_params(self,yaml_file_path):
-        
-        # Get dict format of the parameter 
+
+    def init_params(self, yaml_file_path):
+
+        # Get dict format of the parameter
         with open(yaml_file_path) as yaml_file:
             yaml_params = yaml.full_load(yaml_file)
             self.get_logger().info(str(yaml_params))
-            
-            for init_param,init_value in (yaml_params.items()):
+
+            for init_param, init_value in yaml_params.items():
                 param = self.declare_parameter(init_param, init_value)
-                self.get_logger().info(f'{param.name}={param.value}')
+                self.get_logger().info(f"{param.name}={param.value}")
 
         self.add_on_set_parameters_callback(self.on_params_changed)
- 
+
     def on_params_changed(self, params):
 
         param: rclpy.Parameter
-        
+
         # angular_velocity_gain: 1.8
         self.get_logger().info(str(self.controller.input_cost_matrix_i))
-        
+
         current_params = self.controller.__dict__
-        
-        #self.get_logger().info(str(current_params))
-        
+
+        # self.get_logger().info(str(current_params))
+
         for param in params:
-                
+
             # Parameter for the ideal-diff-drive-mpc
             if param.name in current_params.keys():
                 # Va chercher dans le dictionnaire des param'etres du controleur la valeur
                 param_in_controller = self.controller.__dict__[param.name]
-                self.get_logger().info(f'Try to set [{param.name}] = {param_in_controller}')
+                self.get_logger().info(
+                    f"Try to set [{param.name}] = {param_in_controller}"
+                )
 
                 current_params[param.name] = param.value
                 self.controller.__dict__[param.name] = param.value
-                
+
                 param_in_controller = self.controller.__dict__[param.name]
-                self.get_logger().info(f'The param [{param.name}] has been set to {param_in_controller}')
-                
+                self.get_logger().info(
+                    f"The param [{param.name}] has been set to {param_in_controller}"
+                )
+
                 if param.name in self.controller.__dict__["param_that_start_init"]:
                     self.controller.__dict__["function_to_re_init"] = True
 
-                
             else:
                 continue
 
-        #self.get_logger().info(f"After change parameters {self.controller.__dict__}")
-            # ros2 param get /controller_node angular_velocity_gain 
-            # ros2 param set /controller_node angular_velocity_gain  3.0
-            # ros2 param list
-        return SetParametersResult(successful=True, reason='Parameter set')
-
-    def quaternion_to_euler(self, w, x, y, z):
-        sinr_cosp = 2 * (w * x + y * z)
-        cosr_cosp = 1 - 2 * (x ** 2 + y ** 2)
-        roll = np.arctan2(sinr_cosp, cosr_cosp)
-
-        sinp = 2 * (w * y - z * x)
-        pitch = np.where(np.abs(sinp) >= 1,
-                         np.sign(sinp) * np.pi / 2,
-                         np.arcsin(sinp))
-
-        siny_cosp = 2 * (w * z + x * y)
-        cosy_cosp = 1 - 2 * (y ** 2 + z ** 2)
-        yaw = np.arctan2(siny_cosp, cosy_cosp)
-
-        return np.array([roll, pitch, yaw])
-    
-    def euler_to_quaternion(self, roll, pitch, yaw):
-        cy = np.cos(yaw * 0.5)
-        sy = np.sin(yaw * 0.5)
-        cp = np.cos(pitch * 0.5)
-        sp = np.sin(pitch * 0.5)
-        cr = np.cos(roll * 0.5)
-        sr = np.sin(roll * 0.5)
-
-        x = cy * cp * sr - sy * sp * cr
-        y = sy * cp * sr + cy * sp * cr
-        z = sy * cp * cr - cy * sp * sr
-        w = cy * cp * cr + sy * sp * sr
-
-        return x, y, z, w
+        return SetParametersResult(successful=True, reason="Parameter set")
 
     def odometry_callback(self, message):
         with self.state_velocity_mutex:
-            self.state[0] = message.pose.pose.position.x
-            self.state[1] = message.pose.pose.position.y
-            self.state[2] = message.pose.pose.position.z
-            self.state[3:] = self.quaternion_to_euler(message.pose.pose.orientation.w,
-                                                      message.pose.pose.orientation.x,
-                                                      message.pose.pose.orientation.y,
-                                                      message.pose.pose.orientation.z)
-            self.velocity[0] = message.twist.twist.linear.x
-            self.velocity[1] = message.twist.twist.linear.y
-            self.velocity[2] = message.twist.twist.linear.z
-            self.velocity[3] = message.twist.twist.angular.x
-            self.velocity[4] = message.twist.twist.angular.y
-            self.velocity[5] = message.twist.twist.angular.z
+            position = message.pose.pose.position
+            quat = message.pose.pose.orientation
+            twist = message.twist.twist
+            self.state[0:3] = [position.x, position.y, position.z]
+            self.state[3:] = R.from_quat([quat.x, quat.y, quat.z, quat.w]).as_euler(
+                "xyz"
+            )
+            self.velocity[0:3] = [twist.linear.x, twist.linear.y, twist.linear.z]
+            self.velocity[3:] = [twist.angular.x, twist.angular.y, twist.angular.z]
 
     def command_array_to_twist_msg(self, command_array):
         cmd_vel_msg = TwistStamped()
@@ -204,19 +171,14 @@ class ControllerNode(Node):
         cmd_vel_msg.twist.linear.x = command_array[0]
         cmd_vel_msg.twist.angular.z = command_array[1]
         return cmd_vel_msg
-    
+
     def planar_state_to_pose_msg(self, planar_state):
         pose_msg = PoseStamped()
         pose_msg.header.frame_id = "map"
         pose_msg.header.stamp = self.get_clock().now().to_msg()
-        pose_msg.pose.position.x = planar_state[0]
-        pose_msg.pose.position.y = planar_state[1]
-        pose_msg.pose.position.z = 0.0
-        x, y, z, w = self.euler_to_quaternion(0.0, 0.0, planar_state[2])
-        pose_msg.pose.orientation.x = x
-        pose_msg.pose.orientation.y = y
-        pose_msg.pose.orientation.z = z
-        pose_msg.pose.orientation.w = w
+        pose_msg.pose.position = Point(x=planar_state[0], y=planar_state[1], z=0.0)
+        x, y, z, w = R.from_euler(0.0, 0.0, planar_state[2]).as_quat()
+        pose_msg.pose.orientation = Quaternion(x=x, y=y, z=z, w=w)
         return pose_msg
 
     def compute_then_publish_command(self):
@@ -236,7 +198,9 @@ class ControllerNode(Node):
         optim_path_msg.header.stamp = self.get_clock().now().to_msg()
         optim_path_msg.header.frame_id = "map"
         for k in range(0, self.controller.horizon_length):
-            pose = self.planar_state_to_pose_msg(self.controller.optim_trajectory_array[:, k])
+            pose = self.planar_state_to_pose_msg(
+                self.controller.optim_trajectory_array[:, k]
+            )
             optim_path_msg.poses.append(pose)
         self.optim_path_publisher_.publish(optim_path_msg)
 
@@ -245,7 +209,9 @@ class ControllerNode(Node):
         target_path_msg.header.stamp = self.get_clock().now().to_msg()
         target_path_msg.header.frame_id = "map"
         for k in range(0, self.controller.horizon_length):
-            pose = self.planar_state_to_pose_msg(self.controller.target_trajectory[:, k])
+            pose = self.planar_state_to_pose_msg(
+                self.controller.target_trajectory[:, k]
+            )
             target_path_msg.poses.append(pose)
         self.target_path_publisher_.publish(target_path_msg)
 
@@ -254,7 +220,11 @@ class ControllerNode(Node):
         ref_path_msg.header.stamp = self.get_clock().now().to_msg()
         ref_path_msg.header.frame_id = "map"
         for k in range(0, self.controller.path.n_poses):
-            planar_state = [self.controller.path.poses[k, 0], self.controller.path.poses[k, 1], self.controller.path.angles[k]]
+            planar_state = [
+                self.controller.path.poses[k, 0],
+                self.controller.path.poses[k, 1],
+                self.controller.path.angles[k],
+            ]
             pose = self.planar_state_to_pose_msg(planar_state)
             ref_path_msg.poses.append(pose)
         self.ref_path_publisher_.publish(ref_path_msg)
@@ -270,48 +240,56 @@ class ControllerNode(Node):
             current_path_length = len(current_path.poses)
             current_path_array = np.zeros((current_path_length, 6))
             for i in range(0, current_path_length):
-                current_path_array[i, 0] = current_path.poses[i].pose.position.x
-                current_path_array[i, 1] = current_path.poses[i].pose.position.y
-                current_path_array[i, 2] = current_path.poses[i].pose.position.z
-                current_path_array[i, 3:] = self.quaternion_to_euler(current_path.poses[i].pose.orientation.w,
-                                                                     current_path.poses[i].pose.orientation.x,
-                                                                     current_path.poses[i].pose.orientation.y,
-                                                                     current_path.poses[i].pose.orientation.z)
+                position = current_path.poses[i].pose
+                orientation = current_path.poses[i].pose.orientation
+                current_path_array[i, :3] = [position.x, position.y, position.z]
+                current_path_array[i, 3:] = R.from_quat(
+                    [orientation.x, orientation.y, orientation.z, orientation.w]
+                ).as_euler("xyz")
             current_path_object = Path(current_path_array)
             current_path_object.going_forward = current_path.forward
-            current_path_object.compute_metrics(self.controller.path_look_ahead_distance)
+            current_path_object.compute_metrics(
+                self.controller.path_look_ahead_distance
+            )
             self.goal_paths_list.append(current_path_object)
         self.number_of_goal_paths = len(self.goal_paths_list)
-        self.get_logger().info("Path import done, proceeding to executing " + str(self.number_of_goal_paths) + " path(s)...")
+        self.get_logger().info(
+            f"Path import done, proceeding to executing {self.number_of_goal_paths} path(s)..."
+        )
 
         ## execute paths one by one
         for i in range(0, self.number_of_goal_paths):
             # load all goal paths in sequence
-            self.get_logger().info("Executing path " + str(i + 1) + " of " + str(self.number_of_goal_paths))
+            self.get_logger().info(
+                f"Executing path {i + 1} of {self.number_of_goal_paths}"
+            )
             self.controller.update_path(self.goal_paths_list[i])
             self.publish_reference_path()
-            self.controller.previous_input_array = np.zeros((2, self.controller.horizon_length))
+            self.controller.previous_input_array = np.zeros(
+                (2, self.controller.horizon_length)
+            )
 
             # while loop to repeat a single goal path
             if i > 0 and self.rotation_controller_bool:
                 self.rotation_controller.update_path(self.goal_paths_list[i])
-                while self.rotation_controller.angular_distance_to_goal >= self.rotation_controller.goal_tolerance:
+                while (
+                    self.rotation_controller.angular_distance_to_goal
+                    >= self.rotation_controller.goal_tolerance
+                ):
                     self.compute_then_publish_rotation_command()
                     self.rate.sleep()
             self.last_distance_to_goal = 1000
             self.controller.compute_distance_to_goal(self.state, 0)
             self.controller.next_path_idx = 0
 
-            for j in range(0, self.controller.path.n_poses):
-                self.get_logger().info('ref_traj_x_' + str(j) + ' ' + str(self.controller.path.poses[j, 0]))
-                self.get_logger().info('ref_traj_y_' + str(j) + ' ' + str(self.controller.path.poses[j, 1]))
+            self.get_logger().info(f"Ref path: {self.controller.path.poses}")
 
             while self.controller.distance_to_goal >= self.controller.goal_tolerance:
                 self.compute_then_publish_command()
                 self.publish_optimal_path()
                 self.publish_target_path()
                 self.print_debug()
-                if self.controller.next_path_idx >= self.controller.path.n_poses-1:
+                if self.controller.next_path_idx >= self.controller.path.n_poses - 1:
                     if self.controller.distance_to_goal > self.last_distance_to_goal:
                         break
                     else:
@@ -327,26 +305,31 @@ class ControllerNode(Node):
         ## return completed path to action client
         path_goal_handle.succeed()
         paths_result = FollowPath.Result()
-        result_status = std_msgs.msg.UInt32()
-        result_status.data = 1  # 1 for success
+        result_status = UInt32(data=1)  # 1 for success
         paths_result.result_status = result_status
         return paths_result
-            
+
     def print_debug(self):
-        self.get_logger().debug('optimal left : ' + str(self.controller.optimal_left))
-        self.get_logger().debug('optimal right : ' + str(self.controller.optimal_right))
-        self.get_logger().debug('controller_x : ' + str(self.controller.planar_state[0]))
-        self.get_logger().debug('controller_y : ' + str(self.controller.planar_state[1]))
-        self.get_logger().debug('controller_yaw : ' + str(self.controller.planar_state[2]))
+        self.get_logger().debug(
+            f"Next command : (Left) {self.controller.optimal_left}, (Right) {self.controller.optimal_right}"
+        )
+        self.get_logger().debug(f"Planar state : {self.controller.planar_state}")
+        self.get_logger().debug(f"Target path: {self.controller.target_trajectory.T}")
+        self.get_logger().debug(
+            f"Optimal commands: {self.controller.optim_solution_array[j]}"
+        )
         for j in range(0, self.controller.horizon_length):
-            self.get_logger().debug('target_traj_x_' + str(j) + ' ' + str(self.controller.target_trajectory[0, j]))
-            self.get_logger().debug('target_traj_y_' + str(j) + ' ' + str(self.controller.target_trajectory[1, j]))
-            self.get_logger().debug('optimal_left_' + str(j) + ' ' + str(self.controller.optim_solution_array[j]))
-            self.get_logger().debug('optimal_right_' + str(j) + ' ' + str(self.controller.optim_solution_array[j + self.controller.horizon_length]))
-        #self.get_logger().debug('Path Curvature : ' + str(self.controller.path_curvature))
-        self.get_logger().debug('look ahead distance counter : ' + str(self.controller.path_look_ahead_distance))
-        self.get_logger().debug('Distance_to_goal : ' + str(self.controller.distance_to_goal))
-        self.get_logger().debug('Euclidean Distance_to_goal : ' + str(self.controller.euclidean_distance_to_goal))
+            self.get_logger().debug(
+                f"optimal_right_{j} {self.controller.optim_solution_array[j + self.controller.horizon_length]}"
+            )
+        # self.get_logger().debug('Path Curvature : ' + str(self.controller.path_curvature))
+        self.get_logger().debug(
+            f"look ahead distance counter: {self.controller.path_look_ahead_distance}"
+        )
+        self.get_logger().debug(f"Distance_to_goal: {self.controller.distance_to_goal}")
+        self.get_logger().debug(
+            f"Euclidean Distance_to_goal: {self.controller.euclidean_distance_to_goal}"
+        )
 
 
 def main(args=None):
@@ -370,5 +353,5 @@ def main(args=None):
         rclpy.shutdown()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
