@@ -177,7 +177,7 @@ class ControllerNode(Node):
         pose_msg.header.frame_id = "map"
         pose_msg.header.stamp = self.get_clock().now().to_msg()
         pose_msg.pose.position = Point(x=planar_state[0], y=planar_state[1], z=0.0)
-        x, y, z, w = R.from_euler(0.0, 0.0, planar_state[2]).as_quat()
+        x, y, z, w = R.from_euler('xyz', [0.0, 0.0, planar_state[2]]).as_quat()
         pose_msg.pose.orientation = Quaternion(x=x, y=y, z=z, w=w)
         return pose_msg
 
@@ -201,6 +201,7 @@ class ControllerNode(Node):
             pose = self.planar_state_to_pose_msg(
                 self.controller.optim_trajectory_array[:, k]
             )
+            pose.pose.position.z = 0.1
             optim_path_msg.poses.append(pose)
         self.optim_path_publisher_.publish(optim_path_msg)
 
@@ -212,6 +213,7 @@ class ControllerNode(Node):
             pose = self.planar_state_to_pose_msg(
                 self.controller.target_trajectory[:, k]
             )
+            pose.pose.position.z = 0.05
             target_path_msg.poses.append(pose)
         self.target_path_publisher_.publish(target_path_msg)
 
@@ -240,7 +242,7 @@ class ControllerNode(Node):
             current_path_length = len(current_path.poses)
             current_path_array = np.zeros((current_path_length, 6))
             for i in range(0, current_path_length):
-                position = current_path.poses[i].pose
+                position = current_path.poses[i].pose.position
                 orientation = current_path.poses[i].pose.orientation
                 current_path_array[i, :3] = [position.x, position.y, position.z]
                 current_path_array[i, 3:] = R.from_quat(
@@ -305,7 +307,8 @@ class ControllerNode(Node):
         ## return completed path to action client
         path_goal_handle.succeed()
         paths_result = FollowPath.Result()
-        result_status = UInt32(data=1)  # 1 for success
+        result_status = UInt32()  
+        result_status.data = 1  # 1 for success
         paths_result.result_status = result_status
         return paths_result
 
@@ -315,10 +318,10 @@ class ControllerNode(Node):
         )
         self.get_logger().debug(f"Planar state : {self.controller.planar_state}")
         self.get_logger().debug(f"Target path: {self.controller.target_trajectory.T}")
-        self.get_logger().debug(
-            f"Optimal commands: {self.controller.optim_solution_array[j]}"
-        )
         for j in range(0, self.controller.horizon_length):
+            self.get_logger().debug(
+                f"optimal_left_{j} {self.controller.optim_solution_array[j]}"
+            )
             self.get_logger().debug(
                 f"optimal_right_{j} {self.controller.optim_solution_array[j + self.controller.horizon_length]}"
             )
