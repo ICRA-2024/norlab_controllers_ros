@@ -65,6 +65,8 @@ class ControllerNode(Node):
             )
             self.rotation_controller_bool = True
 
+        # self.get_logger().info('test_time_constant_left' + str(self.controller.time_constant_left))
+
         # Add the dynamic parameter
         self.init_params(controller_config_path)
 
