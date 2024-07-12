@@ -10,7 +10,7 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.qos import qos_profile_action_status_default
 from multiprocessing import Lock
 
-from geometry_msgs.msg import TwistStamped, PoseStamped, Point, Quaternion
+from geometry_msgs.msg import Twist, TwistStamped, PoseStamped, Point, Quaternion
 from nav_msgs.msg import Odometry
 from nav_msgs.msg import Path as Ros2Path
 from std_msgs.msg import UInt32
@@ -74,7 +74,8 @@ class ControllerNode(Node):
         self.state_velocity_mutex = Lock()
 
         # Initialize publishers
-        self.cmd_publisher_ = self.create_publisher(TwistStamped, "cmd_vel_out", 100)
+        # self.cmd_publisher_ = self.create_publisher(TwistStamped, "cmd_vel_out", 100)
+        self.cmd_publisher_ = self.create_publisher(Twist, "cmd_vel_out", 100)
         self.optim_path_publisher_ = self.create_publisher(
             Ros2Path, "optimal_path", 100
         )
@@ -166,10 +167,11 @@ class ControllerNode(Node):
             self.velocity[3:] = [twist.angular.x, twist.angular.y, twist.angular.z]
 
     def command_array_to_twist_msg(self, command_array):
-        cmd_vel_msg = TwistStamped()
-        cmd_vel_msg.header.stamp = self.get_clock().now().to_msg()
-        cmd_vel_msg.twist.linear.x = command_array[0]
-        cmd_vel_msg.twist.angular.z = command_array[1]
+        # cmd_vel_msg = TwistStamped()
+        # cmd_vel_msg.header.stamp = self.get_clock().now().to_msg()
+        cmd_vel_msg = Twist()
+        cmd_vel_msg.linear.x = command_array[0]
+        cmd_vel_msg.angular.z = command_array[1]
         return cmd_vel_msg
 
     def planar_state_to_pose_msg(self, planar_state):
@@ -298,11 +300,13 @@ class ControllerNode(Node):
                         self.last_distance_to_goal = self.controller.distance_to_goal
                 self.rate.sleep()
 
-        self.cmd_vel_msg = TwistStamped()
-        self.cmd_vel_msg.header.stamp = self.get_clock().now().to_msg()
+        # self.cmd_vel_msg = TwistStamped()
+        # self.cmd_vel_msg.header.stamp = self.get_clock().now().to_msg()
+        self.cmd_vel_msg = Twist()
         self.cmd_publisher_.publish(self.cmd_vel_msg)
 
         self.get_logger().info("SUCCESS")
+        self.clear_paths()
 
         ## return completed path to action client
         path_goal_handle.succeed()
@@ -311,6 +315,12 @@ class ControllerNode(Node):
         result_status.data = 1  # 1 for success
         paths_result.result_status = result_status
         return paths_result
+    
+    def clear_paths(self):
+        empty_path_msg = Ros2Path()
+        self.ref_path_publisher_.publish(empty_path_msg)
+        self.target_path_publisher_.publish(empty_path_msg)
+        self.optim_path_publisher_.publish(empty_path_msg)
 
     def print_debug(self):
         self.get_logger().debug(
