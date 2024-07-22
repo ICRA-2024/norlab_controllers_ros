@@ -4,6 +4,7 @@ import os
 import numpy as np
 
 import rclpy
+from rclpy.timer import Timer
 from rclpy.node import Node
 from rclpy.action import ActionServer
 from rclpy.executors import MultiThreadedExecutor
@@ -14,6 +15,8 @@ from geometry_msgs.msg import Twist, TwistStamped, PoseStamped, Point, Quaternio
 from nav_msgs.msg import Odometry
 from nav_msgs.msg import Path as Ros2Path
 from std_msgs.msg import UInt32
+
+from tf2_ros import Buffer, TransformListener
 
 from norlabcontrollib.path.path import Path
 from norlabcontrollib.controllers.controller_factory import ControllerFactory
@@ -93,6 +96,11 @@ class ControllerNode(Node):
             Odometry, "odom_in", self.odometry_callback, 10
         )
 
+        # TF Listener
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self, spin_thread=True)
+        # self.tf_timer = self.create_timer(0.05, self.update_robot_pose)
+
         # Initialize action server
         self._action_server = ActionServer(
             self, FollowPath, "/follow_path", self.follow_path_callback
@@ -165,6 +173,18 @@ class ControllerNode(Node):
             )
             self.velocity[0:3] = [twist.linear.x, twist.linear.y, twist.linear.z]
             self.velocity[3:] = [twist.angular.x, twist.angular.y, twist.angular.z]
+
+    def update_robot_pose(self):
+        try:
+            tf = self.tf_buffer.lookup_transform("base_link", "map", 0)
+            position = tf.transform.translation
+            quat = tf.transform.rotation
+            self.state[0:3] = [position.x, position.y, position.z]
+            self.state[3:] = R.from_quat([quat.x, quat.y, quat.z, quat.w]).as_euler(
+                "xyz"
+            )
+        except:
+            self.get_logger().warn("Failed to get transform from base_link to map.")
 
     def command_array_to_twist_msg(self, command_array):
         # cmd_vel_msg = TwistStamped()
