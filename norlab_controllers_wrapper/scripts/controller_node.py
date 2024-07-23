@@ -4,8 +4,6 @@ import os
 import numpy as np
 
 import rclpy
-import rclpy.clock
-from rclpy.timer import Timer
 from rclpy.node import Node
 from rclpy.action import ActionServer
 from rclpy.executors import MultiThreadedExecutor
@@ -135,35 +133,25 @@ class ControllerNode(Node):
         self.add_on_set_parameters_callback(self.on_params_changed)
 
     def on_params_changed(self, params):
-
-        param: rclpy.Parameter
-
-        # angular_velocity_gain: 1.8
-        self.get_logger().info(str(self.controller.input_cost_matrix_i))
-
+        
+        # Change controller parameters during runtime (dynamic parameters)
         current_params = self.controller.__dict__
 
-        # self.get_logger().info(str(current_params))
-
         for param in params:
-
-            # Parameter for the ideal-diff-drive-mpc
             if param.name in current_params.keys():
-                # Va chercher dans le dictionnaire des param'etres du controleur la valeur
                 param_in_controller = self.controller.__dict__[param.name]
                 self.get_logger().info(
-                    f"Try to set [{param.name}] = {param_in_controller}"
+                    f"Trying to change [{param.name}] to {param.value}, was {param_in_controller}."
                 )
 
                 current_params[param.name] = param.value
                 self.controller.__dict__[param.name] = param.value
+                self.controller.init_casadi_model()
 
                 param_in_controller = self.controller.__dict__[param.name]
                 self.get_logger().info(
                     f"The param [{param.name}] has been set to {param_in_controller}"
                 )
-
-                self.controller.init_casadi_model()
 
             else:
                 continue
@@ -171,12 +159,8 @@ class ControllerNode(Node):
         return SetParametersResult(successful=True, reason="Parameter set")
 
     def odometry_callback(self, message):
-        stamp = message.header.stamp
-        last_odom_time_header = stamp.sec + stamp.nanosec * 1e-9
         self.last_odom_time = self.get_clock().now().nanoseconds * 1e-9
         self.odom_counter += 1
-        # self.get_logger().info(f"Time diff : {self.last_odom_time - last_odom_time_header}")
-        # self.get_logger().info("RECEIVED ODOM")
         with self.state_velocity_mutex:
             position = message.pose.pose.position
             quat = message.pose.pose.orientation
@@ -227,12 +211,12 @@ class ControllerNode(Node):
             if self.last_compute_time < self.last_odom_time:
                 start_time = time.time()
                 command_vector = self.controller.compute_command_vector(self.state)
-                self.get_logger().info(f"Computing delay: {time.time() - start_time} sec")
+                self.get_logger().debug(f"Computing delay: {time.time() - start_time} sec")
                 self.last_compute_time = self.get_clock().now().nanoseconds * 1e-9
-                self.get_logger().info("COMPUTING!")
+                self.get_logger().debug("COMPUTING!")
             else:
                 command_vector, id = self.controller.get_next_command()
-                self.get_logger().info(f"Executing next command, {id}.")
+                self.get_logger().debug(f"Executing next command, {id}.")
             cmd_vel_msg = self.command_array_to_twist_msg(command_vector)
             self.cmd_publisher_.publish(cmd_vel_msg)
 
@@ -333,7 +317,7 @@ class ControllerNode(Node):
             self.controller.compute_distance_to_goal(self.state, 0)
             self.controller.next_path_idx = 0
 
-            self.get_logger().info(f"Ref path: {self.controller.path.poses}")
+            self.get_logger().debug(f"Ref path: {self.controller.path.poses}")
 
             while self.controller.distance_to_goal >= self.controller.goal_tolerance:
                 self.compute_then_publish_command()
