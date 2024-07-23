@@ -92,14 +92,14 @@ class ControllerNode(Node):
         )
 
         # Initialize subscribers
-        self.odom_subscription = self.create_subscription(
-            Odometry, "odom_in", self.odometry_callback, 10
-        )
+        # self.odom_subscription = self.create_subscription(
+        #     Odometry, "odom_in", self.odometry_callback, 10
+        # )
 
         # TF Listener
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self, spin_thread=True)
-        # self.tf_timer = self.create_timer(0.05, self.update_robot_pose)
+        self.tf_timer = self.create_timer(1/self.controller.rate, self.update_robot_pose)
 
         # Odom timer
         self.odom_timer = self.create_timer(1.0, self.update_odom_counter)
@@ -179,13 +179,14 @@ class ControllerNode(Node):
 
     def update_robot_pose(self):
         try:
-            tf = self.tf_buffer.lookup_transform("base_link", "map", 0)
+            tf = self.tf_buffer.lookup_transform("map", "base_link", rclpy.time.Time())
             position = tf.transform.translation
             quat = tf.transform.rotation
             self.state[0:3] = [position.x, position.y, position.z]
             self.state[3:] = R.from_quat([quat.x, quat.y, quat.z, quat.w]).as_euler(
                 "xyz"
             )
+            self.last_odom_time = self.get_clock().now().nanoseconds * 1e-9
         except:
             self.get_logger().warn("Failed to get transform from base_link to map.")
 
@@ -211,12 +212,12 @@ class ControllerNode(Node):
             if self.last_compute_time < self.last_odom_time:
                 start_time = time.time()
                 command_vector = self.controller.compute_command_vector(self.state)
-                self.get_logger().debug(f"Computing delay: {time.time() - start_time} sec")
+                self.get_logger().info(f"Computing delay: {time.time() - start_time} sec")
                 self.last_compute_time = self.get_clock().now().nanoseconds * 1e-9
-                self.get_logger().debug("COMPUTING!")
+                self.get_logger().info("COMPUTING!")
             else:
                 command_vector, id = self.controller.get_next_command()
-                self.get_logger().debug(f"Executing next command, {id}.")
+                self.get_logger().info(f"Executing next command, {id}.")
             cmd_vel_msg = self.command_array_to_twist_msg(command_vector)
             self.cmd_publisher_.publish(cmd_vel_msg)
 
