@@ -4,6 +4,7 @@ import os
 import numpy as np
 
 import rclpy
+import rclpy.clock
 from rclpy.timer import Timer
 from rclpy.node import Node
 from rclpy.action import ActionServer
@@ -25,6 +26,7 @@ from rcl_interfaces.msg import SetParametersResult
 import yaml
 
 from scipy.spatial.transform import Rotation as R
+import time
 
 
 class ControllerNode(Node):
@@ -101,6 +103,10 @@ class ControllerNode(Node):
         self.tf_listener = TransformListener(self.tf_buffer, self, spin_thread=True)
         # self.tf_timer = self.create_timer(0.05, self.update_robot_pose)
 
+        # Odom timer
+        self.odom_timer = self.create_timer(1.0, self.update_odom_counter)
+        self.odom_counter = 0
+
         # Initialize action server
         self._action_server = ActionServer(
             self, FollowPath, "/follow_path", self.follow_path_callback
@@ -111,6 +117,9 @@ class ControllerNode(Node):
         self.waiting_for_path = True
         self.loading_path = False
         self.executing_path = False
+
+        self.last_compute_time = self.get_clock().now().nanoseconds * 1e-9
+        self.last_odom_time = self.get_clock().now().nanoseconds * 1e-9
 
     def init_params(self, yaml_file_path):
 
@@ -154,8 +163,7 @@ class ControllerNode(Node):
                     f"The param [{param.name}] has been set to {param_in_controller}"
                 )
 
-                if param.name in self.controller.__dict__["param_that_start_init"]:
-                    self.controller.__dict__["function_to_re_init"] = True
+                self.controller.init_casadi_model()
 
             else:
                 continue
@@ -163,6 +171,12 @@ class ControllerNode(Node):
         return SetParametersResult(successful=True, reason="Parameter set")
 
     def odometry_callback(self, message):
+        stamp = message.header.stamp
+        last_odom_time_header = stamp.sec + stamp.nanosec * 1e-9
+        self.last_odom_time = self.get_clock().now().nanoseconds * 1e-9
+        self.odom_counter += 1
+        # self.get_logger().info(f"Time diff : {self.last_odom_time - last_odom_time_header}")
+        # self.get_logger().info("RECEIVED ODOM")
         with self.state_velocity_mutex:
             position = message.pose.pose.position
             quat = message.pose.pose.orientation
@@ -173,6 +187,11 @@ class ControllerNode(Node):
             )
             self.velocity[0:3] = [twist.linear.x, twist.linear.y, twist.linear.z]
             self.velocity[3:] = [twist.angular.x, twist.angular.y, twist.angular.z]
+
+    def update_odom_counter(self):
+        if self.odom_counter < 8:
+            self.get_logger().warn(f"Received only {self.odom_counter} odom messages in the last second!")
+        self.odom_counter = 0
 
     def update_robot_pose(self):
         try:
@@ -205,7 +224,15 @@ class ControllerNode(Node):
 
     def compute_then_publish_command(self):
         with self.state_velocity_mutex:
-            command_vector = self.controller.compute_command_vector(self.state)
+            if self.last_compute_time < self.last_odom_time:
+                start_time = time.time()
+                command_vector = self.controller.compute_command_vector(self.state)
+                self.get_logger().info(f"Computing delay: {time.time() - start_time} sec")
+                self.last_compute_time = self.get_clock().now().nanoseconds * 1e-9
+                self.get_logger().info("COMPUTING!")
+            else:
+                command_vector, id = self.controller.get_next_command()
+                self.get_logger().info(f"Executing next command, {id}.")
             cmd_vel_msg = self.command_array_to_twist_msg(command_vector)
             self.cmd_publisher_.publish(cmd_vel_msg)
 
