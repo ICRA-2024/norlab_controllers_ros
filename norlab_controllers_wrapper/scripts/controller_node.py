@@ -10,10 +10,12 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.qos import qos_profile_action_status_default
 from multiprocessing import Lock
 
-from geometry_msgs.msg import TwistStamped, PoseStamped, Point, Quaternion
+from geometry_msgs.msg import Twist, TwistStamped, PoseStamped, Point, Quaternion
 from nav_msgs.msg import Odometry
 from nav_msgs.msg import Path as Ros2Path
 from std_msgs.msg import UInt32
+
+from tf2_ros import Buffer, TransformListener
 
 from norlabcontrollib.path.path import Path
 from norlabcontrollib.controllers.controller_factory import ControllerFactory
@@ -22,6 +24,7 @@ from rcl_interfaces.msg import SetParametersResult
 import yaml
 
 from scipy.spatial.transform import Rotation as R
+import time
 
 
 class ControllerNode(Node):
@@ -76,7 +79,8 @@ class ControllerNode(Node):
         self.state_velocity_mutex = Lock()
 
         # Initialize publishers
-        self.cmd_publisher_ = self.create_publisher(TwistStamped, "cmd_vel_out", 100)
+        # self.cmd_publisher_ = self.create_publisher(TwistStamped, "cmd_vel_out", 100)
+        self.cmd_publisher_ = self.create_publisher(Twist, "cmd_vel_out", 100)
         self.optim_path_publisher_ = self.create_publisher(
             Ros2Path, "optimal_path", 100
         )
@@ -90,9 +94,18 @@ class ControllerNode(Node):
         )
 
         # Initialize subscribers
-        self.odom_subscription = self.create_subscription(
-            Odometry, "odom_in", self.odometry_callback, 10
-        )
+        # self.odom_subscription = self.create_subscription(
+        #     Odometry, "odom_in", self.odometry_callback, 10
+        # )
+
+        # TF Listener
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self, spin_thread=True)
+        self.tf_timer = self.create_timer(1/self.controller.rate, self.update_robot_pose)
+
+        # Odom timer
+        self.odom_timer = self.create_timer(1.0, self.update_odom_counter)
+        self.odom_counter = 0
 
         # Initialize action server
         self._action_server = ActionServer(
@@ -104,6 +117,9 @@ class ControllerNode(Node):
         self.waiting_for_path = True
         self.loading_path = False
         self.executing_path = False
+
+        self.last_compute_time = self.get_clock().now().nanoseconds * 1e-9
+        self.last_odom_time = self.get_clock().now().nanoseconds * 1e-9
 
     def init_params(self, yaml_file_path):
 
@@ -119,36 +135,25 @@ class ControllerNode(Node):
         self.add_on_set_parameters_callback(self.on_params_changed)
 
     def on_params_changed(self, params):
-
-        param: rclpy.Parameter
-
-        # angular_velocity_gain: 1.8
-        self.get_logger().info(str(self.controller.input_cost_matrix_i))
-
+        
+        # Change controller parameters during runtime (dynamic parameters)
         current_params = self.controller.__dict__
 
-        # self.get_logger().info(str(current_params))
-
         for param in params:
-
-            # Parameter for the ideal-diff-drive-mpc
             if param.name in current_params.keys():
-                # Va chercher dans le dictionnaire des param'etres du controleur la valeur
                 param_in_controller = self.controller.__dict__[param.name]
                 self.get_logger().info(
-                    f"Try to set [{param.name}] = {param_in_controller}"
+                    f"Trying to change [{param.name}] to {param.value}, was {param_in_controller}."
                 )
 
                 current_params[param.name] = param.value
                 self.controller.__dict__[param.name] = param.value
+                self.controller.init_casadi_model()
 
                 param_in_controller = self.controller.__dict__[param.name]
                 self.get_logger().info(
                     f"The param [{param.name}] has been set to {param_in_controller}"
                 )
-
-                if param.name in self.controller.__dict__["param_that_start_init"]:
-                    self.controller.__dict__["function_to_re_init"] = True
 
             else:
                 continue
@@ -156,6 +161,8 @@ class ControllerNode(Node):
         return SetParametersResult(successful=True, reason="Parameter set")
 
     def odometry_callback(self, message):
+        self.last_odom_time = self.get_clock().now().nanoseconds * 1e-9
+        self.odom_counter += 1
         with self.state_velocity_mutex:
             position = message.pose.pose.position
             quat = message.pose.pose.orientation
@@ -167,11 +174,30 @@ class ControllerNode(Node):
             self.velocity[0:3] = [twist.linear.x, twist.linear.y, twist.linear.z]
             self.velocity[3:] = [twist.angular.x, twist.angular.y, twist.angular.z]
 
+    def update_odom_counter(self):
+        if self.odom_counter < 8:
+            self.get_logger().warn(f"Received only {self.odom_counter} odom messages in the last second!")
+        self.odom_counter = 0
+
+    def update_robot_pose(self):
+        try:
+            tf = self.tf_buffer.lookup_transform("map", "base_link", rclpy.time.Time())
+            position = tf.transform.translation
+            quat = tf.transform.rotation
+            self.state[0:3] = [position.x, position.y, position.z]
+            self.state[3:] = R.from_quat([quat.x, quat.y, quat.z, quat.w]).as_euler(
+                "xyz"
+            )
+            self.last_odom_time = self.get_clock().now().nanoseconds * 1e-9
+        except:
+            self.get_logger().warn("Failed to get transform from base_link to map.")
+
     def command_array_to_twist_msg(self, command_array):
-        cmd_vel_msg = TwistStamped()
-        cmd_vel_msg.header.stamp = self.get_clock().now().to_msg()
-        cmd_vel_msg.twist.linear.x = command_array[0]
-        cmd_vel_msg.twist.angular.z = command_array[1]
+        # cmd_vel_msg = TwistStamped()
+        # cmd_vel_msg.header.stamp = self.get_clock().now().to_msg()
+        cmd_vel_msg = Twist()
+        cmd_vel_msg.linear.x = command_array[0]
+        cmd_vel_msg.angular.z = command_array[1]
         return cmd_vel_msg
 
     def planar_state_to_pose_msg(self, planar_state):
@@ -185,7 +211,15 @@ class ControllerNode(Node):
 
     def compute_then_publish_command(self):
         with self.state_velocity_mutex:
-            command_vector = self.controller.compute_command_vector(self.state)
+            if self.last_compute_time < self.last_odom_time:
+                start_time = time.time()
+                command_vector = self.controller.compute_command_vector(self.state)
+                self.get_logger().info(f"Computing delay: {time.time() - start_time} sec")
+                self.last_compute_time = self.get_clock().now().nanoseconds * 1e-9
+                self.get_logger().info("COMPUTING!")
+            else:
+                command_vector, id = self.controller.get_next_command()
+                self.get_logger().info(f"Executing next command, {id}.")
             cmd_vel_msg = self.command_array_to_twist_msg(command_vector)
             self.cmd_publisher_.publish(cmd_vel_msg)
 
@@ -286,7 +320,7 @@ class ControllerNode(Node):
             self.controller.compute_distance_to_goal(self.state, 0)
             self.controller.next_path_idx = 0
 
-            self.get_logger().info(f"Ref path: {self.controller.path.poses}")
+            self.get_logger().debug(f"Ref path: {self.controller.path.poses}")
 
             while self.controller.distance_to_goal >= self.controller.goal_tolerance:
                 self.compute_then_publish_command()
@@ -300,11 +334,13 @@ class ControllerNode(Node):
                         self.last_distance_to_goal = self.controller.distance_to_goal
                 self.rate.sleep()
 
-        self.cmd_vel_msg = TwistStamped()
-        self.cmd_vel_msg.header.stamp = self.get_clock().now().to_msg()
+        # self.cmd_vel_msg = TwistStamped()
+        # self.cmd_vel_msg.header.stamp = self.get_clock().now().to_msg()
+        self.cmd_vel_msg = Twist()
         self.cmd_publisher_.publish(self.cmd_vel_msg)
 
         self.get_logger().info("SUCCESS")
+        self.clear_paths()
 
         ## return completed path to action client
         path_goal_handle.succeed()
@@ -313,6 +349,12 @@ class ControllerNode(Node):
         result_status.data = 1  # 1 for success
         paths_result.result_status = result_status
         return paths_result
+    
+    def clear_paths(self):
+        empty_path_msg = Ros2Path()
+        self.ref_path_publisher_.publish(empty_path_msg)
+        self.target_path_publisher_.publish(empty_path_msg)
+        self.optim_path_publisher_.publish(empty_path_msg)
 
     def print_debug(self):
         self.get_logger().debug(
