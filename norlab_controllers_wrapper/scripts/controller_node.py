@@ -13,13 +13,14 @@ from multiprocessing import Lock
 from geometry_msgs.msg import Twist, TwistStamped, PoseStamped, Point, Quaternion
 from nav_msgs.msg import Odometry
 from nav_msgs.msg import Path as Ros2Path
-from std_msgs.msg import UInt32
+from std_msgs.msg import UInt32,Bool
 
 from tf2_ros import Buffer, TransformListener
 
 from norlabcontrollib.path.path import Path
 from norlabcontrollib.controllers.controller_factory import ControllerFactory
 from norlab_controllers_msgs.action import FollowPath
+from norlab_controllers_msgs.msg import ChangeController
 from rcl_interfaces.msg import SetParametersResult
 import yaml
 
@@ -120,7 +121,30 @@ class ControllerNode(Node):
 
         self.last_compute_time = self.get_clock().now().nanoseconds * 1e-9
         self.last_odom_time = self.get_clock().now().nanoseconds * 1e-9
+    
+        # Change controller server
 
+        self.srv_change_controller = self.create_service(ChangeController,"change_controller",self.change_controller_callback)
+    
+    def change_controller_callback(self,request,response):
+        # request param 
+        
+        controller_config_path = request.controller_config_path.data
+        
+        # Create config 
+        self.controller_factory = ControllerFactory()
+        self.controller = self.controller_factory.load_parameters_from_yaml(
+            controller_config_path
+        )
+        # Initialize dynamic parameters
+        self.init_params(controller_config_path)
+
+        # Response : successfull 
+        ros_bool = Bool()
+        ros_bool.data = True
+        response.success = ros_bool
+        
+        return response
     def init_params(self, yaml_file_path):
 
         # Get dict format of the parameter

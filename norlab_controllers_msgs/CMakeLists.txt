@@ -17,6 +17,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/PathSequence.msg"
   "msg/FollowerOptions.msg"
   "srv/ExportData.srv"
+  "srv/ChangeControllers.srv"
   DEPENDENCIES std_msgs geometry_msgs
 )
 
