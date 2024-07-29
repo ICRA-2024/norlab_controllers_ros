@@ -20,7 +20,7 @@ from tf2_ros import Buffer, TransformListener
 from norlabcontrollib.path.path import Path
 from norlabcontrollib.controllers.controller_factory import ControllerFactory
 from norlab_controllers_msgs.action import FollowPath
-from norlab_controllers_msgs.msg import ChangeController
+#from norlab_controllers_msgs.srv import ChangeController
 from rcl_interfaces.msg import SetParametersResult
 import yaml
 
@@ -124,7 +124,7 @@ class ControllerNode(Node):
     
         # Change controller server
 
-        self.srv_change_controller = self.create_service(ChangeController,"change_controller",self.change_controller_callback)
+        #self.srv_change_controller = self.create_service(ChangeController,"change_controller",self.change_controller_callback)
     
     def change_controller_callback(self,request,response):
         # request param 

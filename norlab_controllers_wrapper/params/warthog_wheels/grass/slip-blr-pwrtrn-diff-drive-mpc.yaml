@@ -13,5 +13,5 @@ input_cost_wheel: 0.05 #last test 0.005
 angular_velocity_gain: 1.0
 wheel_radius: 0.285
 baseline: 1.08
-pwrtrn_param_path: 'params/warthog_wheels/gravel/trained_params/powertrain'
-slip_blr_param_path: 'params/warthog_wheels/gravel/trained_params/slip/blr/steady-state'
+pwrtrn_param_path: '/home/robot/ros2_ws/src/DRIVE/calib_data/warthog_wheels_grass_2024_7_29_14h46s15/model_training_results/powertrain'
+slip_blr_param_path: '/home/robot/ros2_ws/src/DRIVE/calib_data/warthog_wheels_grass_2024_7_29_14h46s15/model_training_results/slip_blr'
