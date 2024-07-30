@@ -13,5 +13,5 @@ input_cost_wheel: 0.05 #last test 0.005
 angular_velocity_gain: 1.0
 wheel_radius: 0.285
 baseline: 1.08
-pwrtrn_param_path: 'params/warthog_wheels/gravel/trained_params/powertrain'
+pwrtrn_param_path: 'params/warthog_wheels/grass/trained_params/powertrain'
 slip_blr_param_path: 'params/warthog_wheels/gravel/trained_params/slip/blr/steady-state'
