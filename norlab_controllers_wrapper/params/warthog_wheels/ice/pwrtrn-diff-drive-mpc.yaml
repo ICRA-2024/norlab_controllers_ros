@@ -1,9 +1,9 @@
-controller_name: 'IdealDiffDriveMPC'
+controller_name: 'PwrtrnDiffDriveMPC'
 rate: 20
-minimum_linear_velocity: 0.2
+minimum_linear_velocity: 1.0
 maximum_linear_velocity: 3.0
 maximum_angular_velocity: 3.0
-goal_tolerance: 1.0
+goal_tolerance: 0.3
 path_look_ahead_distance: 1.5
 id_window_size: 20
 horizon_length: 30
@@ -13,3 +13,4 @@ input_cost_wheel: 0.05 #last test 0.005
 angular_velocity_gain: 1.0
 wheel_radius: 0.285
 baseline: 1.08
+pwrtrn_param_path: '/home/robot/ros2_ws/src/DRIVE/calib_data/warthog_wheels_ice_2024_7_30_16h30s21/model_training_results/100_steps_of_6.0/powertrain'

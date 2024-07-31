@@ -3,7 +3,7 @@ rate: 20
 minimum_linear_velocity: 0.2
 maximum_linear_velocity: 3.0
 maximum_angular_velocity: 3.0
-goal_tolerance: 1.0
+goal_tolerance: 0.3
 path_look_ahead_distance: 1.5
 id_window_size: 20
 horizon_length: 30

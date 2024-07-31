@@ -1,4 +1,4 @@
-controller_name: 'IdealDiffDriveMPC'
+controller_name: 'SlipBLRPwrtrnDiffDriveMPC'
 rate: 20
 minimum_linear_velocity: 0.2
 maximum_linear_velocity: 3.0
@@ -13,3 +13,5 @@ input_cost_wheel: 0.05 #last test 0.005
 angular_velocity_gain: 1.0
 wheel_radius: 0.285
 baseline: 1.08
+pwrtrn_param_path: 'params/warthog_wheels/gravel/trained_params/powertrain'
+slip_blr_param_path: 'params/warthog_wheels/gravel/trained_params/slip/blr/steady-state'
