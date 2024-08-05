@@ -9,21 +9,22 @@ from rclpy.action import ActionServer
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.qos import qos_profile_action_status_default
 from multiprocessing import Lock
-
+from rclpy.exceptions import ParameterNotDeclaredException
 from geometry_msgs.msg import Twist, TwistStamped, PoseStamped, Point, Quaternion
 from nav_msgs.msg import Odometry
 from nav_msgs.msg import Path as Ros2Path
-from std_msgs.msg import UInt32,Bool
+from std_msgs.msg import UInt32,Bool,String
 
 from tf2_ros import Buffer, TransformListener
 
 from norlabcontrollib.path.path import Path
 from norlabcontrollib.controllers.controller_factory import ControllerFactory
 from norlab_controllers_msgs.action import FollowPath
-#from norlab_controllers_msgs.srv import ChangeController
+from norlab_controllers_msgs.srv import ChangeController
 from rcl_interfaces.msg import SetParametersResult
+from rcl_interfaces.msg import ParameterValue
+from rclpy.parameter import Parameter
 import yaml
-
 from scipy.spatial.transform import Rotation as R
 import time
 
@@ -43,6 +44,7 @@ class ControllerNode(Node):
         controller_config_path = (
             self.get_parameter("controller_config").get_parameter_value().string_value
         )
+        
         self.get_logger().info(f"Controller config: {controller_config_path}")
         self.declare_parameter("rotation_controller_config")
         rotation_controller_config_path = (
@@ -124,21 +126,40 @@ class ControllerNode(Node):
     
         # Change controller server
 
-        #self.srv_change_controller = self.create_service(ChangeController,"change_controller",self.change_controller_callback)
+        self.srv_change_controller = self.create_service(ChangeController,"change_controller",self.change_controller_callback)
+        
     
     def change_controller_callback(self,request,response):
         # request param 
         
         controller_config_path = request.controller_config_path.data
         
-        # Create config 
+        # Load the new controller 
         self.controller_factory = ControllerFactory()
         self.controller = self.controller_factory.load_parameters_from_yaml(
             controller_config_path
         )
-        # Initialize dynamic parameters
-        self.init_params(controller_config_path)
 
+        # Actualise the value in the ros environement
+        with open(controller_config_path, 'r') as f:
+            controller_params = yaml.load(f, Loader=yaml.SafeLoader)
+        
+        for param, param_value in controller_params.items():
+            
+            parameter = Parameter(param,value=param_value)
+
+            self.get_logger().info(f"param_value_type {type(param_value)}")
+
+            try:
+                self.set_parameters([parameter])
+            except ParameterNotDeclaredException:
+                self.get_logger().warning(f"New parameter declared: {param} = {param_value}")
+                self.declare_parameter(param,param_value)
+                test = 1
+                #self.set_parameters(parameter)
+        
+        self.get_logger().info("\n"*5+"all parameters have been set"+"\n"*5)
+        
         # Response : successfull 
         ros_bool = Bool()
         ros_bool.data = True
