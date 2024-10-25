@@ -5,7 +5,7 @@ import numpy as np
 
 import rclpy
 from rclpy.node import Node
-from rclpy.action import ActionServer
+from rclpy.action import ActionServer, CancelResponse
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.qos import qos_profile_action_status_default
 from multiprocessing import Lock
@@ -86,9 +86,7 @@ class ControllerNode(Node):
             Ros2Path, "target_path", 100
         )
         self.ref_path_publisher_ = self.create_publisher(
-            Ros2Path,
-            "ref_path",
-            qos_profile_action_status_default,  # Makes durability transient_local
+            Ros2Path, "ref_path", qos_profile_action_status_default,  # Makes durability transient_local
         )
 
         # Initialize subscribers
@@ -107,7 +105,7 @@ class ControllerNode(Node):
 
         # Initialize action server
         self._action_server = ActionServer(
-            self, FollowPath, "/follow_path", self.follow_path_callback
+            self, FollowPath, "/follow_path", self.follow_path_callback, cancel_callback=self.cancel_callback
         )
 
         self.rate = self.create_rate(self.controller.rate)
@@ -166,9 +164,7 @@ class ControllerNode(Node):
             quat = message.pose.pose.orientation
             twist = message.twist.twist
             self.state[0:3] = [position.x, position.y, position.z]
-            self.state[3:] = R.from_quat([quat.x, quat.y, quat.z, quat.w]).as_euler(
-                "xyz"
-            )
+            self.state[3:] = R.from_quat([quat.x, quat.y, quat.z, quat.w]).as_euler("xyz")
             self.velocity[0:3] = [twist.linear.x, twist.linear.y, twist.linear.z]
             self.velocity[3:] = [twist.angular.x, twist.angular.y, twist.angular.z]
 
@@ -183,10 +179,9 @@ class ControllerNode(Node):
             position = tf.transform.translation
             quat = tf.transform.rotation
             self.state[0:3] = [position.x, position.y, position.z]
-            self.state[3:] = R.from_quat([quat.x, quat.y, quat.z, quat.w]).as_euler(
-                "xyz"
-            )
+            self.state[3:] = R.from_quat([quat.x, quat.y, quat.z, quat.w]).as_euler("xyz")
             self.last_odom_time = self.get_clock().now().nanoseconds * 1e-9
+            self.odom_counter += 1  
         except:
             self.get_logger().warn("Failed to get transform from base_link to map.")
 
@@ -265,88 +260,73 @@ class ControllerNode(Node):
             ref_path_msg.poses.append(pose)
         self.ref_path_publisher_.publish(ref_path_msg)
 
-    def follow_path_callback(self, path_goal_handle):
+    def follow_path_callback(self, goal_handle):
         ## Importing all goal paths
         self.get_logger().info("Importing goal paths...")
-        goal_paths = path_goal_handle.request.path.paths
-        self.path_goal_handle = path_goal_handle
-        self.goal_paths_list = []
-        self.goal_paths_directions_list = []
-        for current_path in goal_paths:
-            current_path_length = len(current_path.poses)
-            current_path_array = np.zeros((current_path_length, 6))
-            for i in range(0, current_path_length):
-                position = current_path.poses[i].pose.position
-                orientation = current_path.poses[i].pose.orientation
-                current_path_array[i, :3] = [position.x, position.y, position.z]
-                current_path_array[i, 3:] = R.from_quat(
-                    [orientation.x, orientation.y, orientation.z, orientation.w]
-                ).as_euler("xyz")
-            current_path_object = Path(current_path_array)
-            current_path_object.going_forward = current_path.forward
-            current_path_object.compute_metrics(
-                self.controller.path_look_ahead_distance
-            )
-            self.goal_paths_list.append(current_path_object)
-        self.number_of_goal_paths = len(self.goal_paths_list)
-        self.get_logger().info(
-            f"Path import done, proceeding to executing {self.number_of_goal_paths} path(s)..."
-        )
+        current_path = self.custom_path_from_ros2(goal_handle.request.path)
+        self.controller.update_path(current_path)
+        self.publish_reference_path()
 
-        ## execute paths one by one
-        for i in range(0, self.number_of_goal_paths):
-            # load all goal paths in sequence
-            self.get_logger().info(
-                f"Executing path {i + 1} of {self.number_of_goal_paths}"
-            )
-            self.controller.update_path(self.goal_paths_list[i])
-            self.publish_reference_path()
-            self.controller.previous_input_array = np.zeros(
-                (2, self.controller.horizon_length)
-            )
+        self.get_logger().info(f"Path import done, proceeding to executing {current_path.n_poses} pose(s)...")
 
-            # while loop to repeat a single goal path
-            if i > 0 and self.rotation_controller_bool:
-                self.rotation_controller.update_path(self.goal_paths_list[i])
-                while (
-                    self.rotation_controller.angular_distance_to_goal
-                    >= self.rotation_controller.goal_tolerance
-                ):
-                    self.compute_then_publish_rotation_command()
-                    self.rate.sleep()
-            self.last_distance_to_goal = 1000
-            self.controller.compute_distance_to_goal(self.state, 0)
-            self.controller.next_path_idx = 0
+        self.controller.previous_input_array = np.zeros((2, self.controller.horizon_length))
+        self.controller.compute_distance_to_goal(self.state, 0)
+        self.last_distance_to_goal = self.controller.distance_to_goal
+        self.controller.next_path_idx = 0
 
-            self.get_logger().debug(f"Ref path: {self.controller.path.poses}")
+        self.get_logger().info(f"Initial state: {self.state}")
+        self.get_logger().info(f"Ref path: {self.controller.path.poses}")
+        self.get_logger().info(f"Distance to goal: {self.controller.distance_to_goal} m.")
 
-            while self.controller.distance_to_goal >= self.controller.goal_tolerance:
-                self.compute_then_publish_command()
-                self.publish_optimal_path()
-                self.publish_target_path()
-                self.print_debug()
-                if self.controller.next_path_idx >= self.controller.path.n_poses - 1:
-                    if self.controller.distance_to_goal > self.last_distance_to_goal:
-                        break
-                    else:
-                        self.last_distance_to_goal = self.controller.distance_to_goal
-                self.rate.sleep()
-
-        # self.cmd_vel_msg = TwistStamped()
-        # self.cmd_vel_msg.header.stamp = self.get_clock().now().to_msg()
-        self.cmd_vel_msg = Twist()
-        self.cmd_publisher_.publish(self.cmd_vel_msg)
+        while not self.controller.goal_reached():
+            if goal_handle.is_cancel_requested:
+                goal_handle.canceled()
+                self.get_logger().info('Goal canceled! Stopping robot.')
+                self.stop_robot()
+                return FollowPath.Result()
+            
+            self.compute_then_publish_command()
+            self.publish_optimal_path()
+            self.publish_target_path()
+            self.print_debug()
+            if self.controller.next_path_idx >= self.controller.path.n_poses - 1:
+                if self.controller.distance_to_goal > self.last_distance_to_goal:
+                    break
+                else:
+                    self.last_distance_to_goal = self.controller.distance_to_goal
+            self.rate.sleep()
 
         self.get_logger().info("SUCCESS")
         self.clear_paths()
 
         ## return completed path to action client
-        path_goal_handle.succeed()
+        goal_handle.succeed()
         paths_result = FollowPath.Result()
-        result_status = UInt32()  
-        result_status.data = 1  # 1 for success
-        paths_result.result_status = result_status
+        paths_result.result_status = UInt32(data=1)
         return paths_result
+    
+    def cancel_callback(self, goal):
+        """Accept or reject a client request to cancel an action."""
+        self.get_logger().info('Received cancel request')
+        return CancelResponse.ACCEPT
+    
+    def stop_robot(self):
+        # self.cmd_vel_msg = TwistStamped()
+        # self.cmd_vel_msg.header.stamp = self.get_clock().now().to_msg()
+        self.cmd_vel_msg = Twist()
+        self.cmd_publisher_.publish(self.cmd_vel_msg)
+    
+    def custom_path_from_ros2(self, ros2_path):
+        poses = []
+        for pose in ros2_path.poses:
+            x = pose.pose.position.x
+            y = pose.pose.position.y
+            z = pose.pose.position.z
+            quat = pose.pose.orientation
+            roll, pitch, yaw = R.from_quat([quat.x, quat.y, quat.z, quat.w]).as_euler("xyz")
+            poses.append([x, y, z, roll, pitch, yaw])
+        print(poses)
+        return Path(np.array(poses))
     
     def clear_paths(self):
         empty_path_msg = Ros2Path()
